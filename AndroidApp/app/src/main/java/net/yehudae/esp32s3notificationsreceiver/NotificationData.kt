@@ -8,5 +8,7 @@ data class NotificationData(
     val appName: String,
     val title: String,
     val text: String,
-    val timestamp: String
+    val timestamp: String,
+    val isPriority: Boolean = false,
+    val packageName: String = ""
 ) : Parcelable
