@@ -33,6 +33,8 @@ fun SettingsScreen(
     
     var notifications by remember { mutableStateOf(listOf<NotificationData>()) }
     var connectedDeviceInfo by remember { mutableStateOf<ConnectedDeviceInfo?>(null) }
+    var syncStatus by remember { mutableStateOf<SyncStatus?>(null) }
+    var connectionStatus by remember { mutableStateOf("Disconnected") }
     
     LaunchedEffect(bleService) {
         try {
@@ -48,6 +50,26 @@ fun SettingsScreen(
         try {
             bleService?.connectedDeviceInfo?.collect { deviceInfo ->
                 connectedDeviceInfo = deviceInfo
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    LaunchedEffect(bleService) {
+        try {
+            bleService?.syncStatus?.collect { status ->
+                syncStatus = status
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    LaunchedEffect(bleService) {
+        try {
+            bleService?.connectionStatus?.collect { status ->
+                connectionStatus = status
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -110,6 +132,15 @@ fun SettingsScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // NEW: Sync Management Card
+            item {
+                SyncManagementCard(
+                    syncStatus = syncStatus,
+                    connectionStatus = connectionStatus,
+                    onSyncExisting = { bleService?.readExistingNotifications() }
+                )
+            }
+
             // Statistics Card
             item {
                 StatisticsCard(
@@ -134,6 +165,152 @@ fun SettingsScreen(
             // Recent Notifications by Category
             item {
                 NotificationCategoriesCard(notifications = notifications)
+            }
+        }
+    }
+}
+
+// NEW: Sync Management Card
+@Composable
+fun SyncManagementCard(
+    syncStatus: SyncStatus?,
+    connectionStatus: String,
+    onSyncExisting: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = Color.White.copy(alpha = 0.95f)
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(20.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(bottom = 16.dp)
+            ) {
+                Icon(
+                    Icons.Default.Sync,
+                    contentDescription = null,
+                    tint = Color(0xFF667eea),
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Sync Management",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF333333)
+                )
+            }
+
+            // Current sync status
+            if (syncStatus != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (syncStatus.isInProgress) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            color = Color(0xFFFF9800),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            text = "Syncing existing notifications...",
+                            fontSize = 14.sp,
+                            color = Color(0xFF666666)
+                        )
+                    } else {
+                        Icon(
+                            Icons.Default.CheckCircle,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                            tint = Color(0xFF4CAF50)
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = "Last sync: ${syncStatus.sentCount}/${syncStatus.processedCount} notifications sent",
+                                fontSize = 14.sp,
+                                color = Color(0xFF666666)
+                            )
+                            val duration = (syncStatus.endTime ?: System.currentTimeMillis()) - syncStatus.startTime
+                            Text(
+                                text = "Completed in ${duration / 1000}s",
+                                fontSize = 12.sp,
+                                color = Color(0xFF888888)
+                            )
+                        }
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+
+            // Sync button and info
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    onClick = onSyncExisting,
+                    enabled = connectionStatus == "Ready" && syncStatus?.isInProgress != true,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF4CAF50)
+                    ),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    if (syncStatus?.isInProgress == true) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = Color.White,
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(
+                            Icons.Default.Sync,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text("Sync Existing")
+                }
+                
+                Text(
+                    text = if (connectionStatus == "Ready") 
+                        "Reads all current Android notifications" 
+                    else 
+                        "Connect to ESP32S3 first",
+                    fontSize = 12.sp,
+                    color = Color(0xFF666666),
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Sync info
+            Column {
+                Text(
+                    text = "How it works:",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = Color(0xFF333333)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "• Reads all notifications currently in your Android notification panel\n• Filters them using your app settings and preferences\n• Sends them to your connected ESP32S3 device\n• Perfect for initial setup or missed notifications",
+                    fontSize = 12.sp,
+                    color = Color(0xFF666666),
+                    lineHeight = 16.sp
+                )
             }
         }
     }

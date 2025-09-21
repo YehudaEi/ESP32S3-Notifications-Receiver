@@ -43,6 +43,10 @@ class BLEService : Service() {
     private val _connectedDeviceInfo = MutableStateFlow<ConnectedDeviceInfo?>(null)
     val connectedDeviceInfo: StateFlow<ConnectedDeviceInfo?> = _connectedDeviceInfo
 
+    // NEW: Sync status tracking
+    private val _syncStatus = MutableStateFlow<SyncStatus?>(null)
+    val syncStatus: StateFlow<SyncStatus?> = _syncStatus
+
     private val notificationQueue = mutableListOf<NotificationData>()
     private var lastConnectionTime: Long = 0
     private var totalNotificationsSent: Int = 0
@@ -80,16 +84,74 @@ class BLEService : Service() {
             when (intent?.action) {
                 "SEND_NOTIFICATION" -> {
                     val notificationData = intent.getParcelableExtra<NotificationData>("notification_data")
-                    notificationData?.let { sendNotificationToESP32(it) }
+                    val isExisting = intent.getBooleanExtra("is_existing", false)
+                    notificationData?.let { sendNotificationToESP32(it, isExisting) }
                 }
                 "SYNC_CHECK" -> {
                     checkConnectionAndSync()
+                }
+                "READ_EXISTING_NOTIFICATIONS" -> {
+                    readExistingNotifications()
+                }
+                "SYNC_COMPLETED" -> {
+                    val processedCount = intent.getIntExtra("processed_count", 0)
+                    val sentCount = intent.getIntExtra("sent_count", 0)
+                    handleSyncCompleted(processedCount, sentCount)
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error in onStartCommand", e)
         }
         return START_STICKY
+    }
+
+    /**
+     * Trigger reading of existing notifications from NotificationListener
+     */
+    fun readExistingNotifications() {
+        try {
+            Log.d(TAG, "Initiating existing notifications sync...")
+            
+            _syncStatus.value = SyncStatus(
+                isInProgress = true,
+                processedCount = 0,
+                sentCount = 0,
+                startTime = System.currentTimeMillis()
+            )
+            
+            // Send command to NotificationListener to read existing notifications
+            val intent = Intent(this, NotificationListener::class.java).apply {
+                action = NotificationListener.ACTION_READ_EXISTING
+            }
+            startService(intent)
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error initiating existing notifications sync", e)
+            _syncStatus.value = null
+        }
+    }
+
+    private fun handleSyncCompleted(processedCount: Int, sentCount: Int) {
+        try {
+            val currentSync = _syncStatus.value
+            if (currentSync != null) {
+                _syncStatus.value = currentSync.copy(
+                    isInProgress = false,
+                    processedCount = processedCount,
+                    sentCount = sentCount,
+                    endTime = System.currentTimeMillis()
+                )
+                
+                Log.d(TAG, "Sync completed: $sentCount/$processedCount notifications sent")
+                
+                // Clear sync status after 5 seconds
+                android.os.Handler(mainLooper).postDelayed({
+                    _syncStatus.value = null
+                }, 5000)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling sync completion", e)
+        }
     }
 
     fun startScanning() {
@@ -336,7 +398,7 @@ class BLEService : Service() {
         }
     }
 
-    private fun sendNotificationToESP32(notificationData: NotificationData) {
+    private fun sendNotificationToESP32(notificationData: NotificationData, isExisting: Boolean = false) {
         try {
             if (!hasBluetoothPermissions()) {
                 return
@@ -347,15 +409,17 @@ class BLEService : Service() {
                 notificationCharacteristic?.value = message.toByteArray()
                 bluetoothGatt?.writeCharacteristic(notificationCharacteristic)
                 
-                // Update local notifications list
-                val currentList = _notifications.value.toMutableList()
-                currentList.add(0, notificationData)
-                if (currentList.size > 50) { // Keep only last 50 notifications
-                    currentList.removeAt(currentList.size - 1)
+                // Update local notifications list (only for new notifications, not existing sync)
+                if (!isExisting) {
+                    val currentList = _notifications.value.toMutableList()
+                    currentList.add(0, notificationData)
+                    if (currentList.size > 50) { // Keep only last 50 notifications
+                        currentList.removeAt(currentList.size - 1)
+                    }
+                    _notifications.value = currentList
                 }
-                _notifications.value = currentList
                 
-                Log.d(TAG, "Notification sent: ${notificationData.appName} - ${notificationData.title}")
+                Log.d(TAG, "${if (isExisting) "Existing" else "New"} notification sent: ${notificationData.appName} - ${notificationData.title}")
             } else {
                 // Queue notification if not connected (Garmin-like behavior)
                 notificationQueue.add(notificationData)
@@ -369,12 +433,14 @@ class BLEService : Service() {
                     }
                 }
                 
-                // Also enqueue background work for reliability
-                NotificationWorker.enqueueWork(
-                    context = this,
-                    notificationData = notificationData,
-                    delay = 5000 // 5 second delay
-                )
+                // Also enqueue background work for reliability (only for new notifications)
+                if (!isExisting) {
+                    NotificationWorker.enqueueWork(
+                        context = this,
+                        notificationData = notificationData,
+                        delay = 5000 // 5 second delay
+                    )
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error sending notification", e)
@@ -465,4 +531,12 @@ data class ConnectedDeviceInfo(
     val connectionTime: Long,
     val status: String,
     val notificationsSent: Int
+)
+
+data class SyncStatus(
+    val isInProgress: Boolean,
+    val processedCount: Int,
+    val sentCount: Int,
+    val startTime: Long,
+    val endTime: Long? = null
 )

@@ -85,6 +85,7 @@ class MainActivity : ComponentActivity() {
                             onOpenNotificationSettings = { openNotificationSettings() },
                             onNavigateToDevices = { currentScreen = "devices" },
                             onNavigateToSettings = { currentScreen = "settings" },
+                            onSyncExistingNotifications = { syncExistingNotifications() },
                             bleService = bleService
                         )
                         "devices" -> DeviceDiscoveryScreen(
@@ -172,6 +173,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun syncExistingNotifications() {
+        try {
+            bleService?.readExistingNotifications()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     private fun openNotificationSettings() {
         try {
             val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
@@ -189,11 +198,13 @@ fun MainScreen(
     onOpenNotificationSettings: () -> Unit,
     onNavigateToDevices: () -> Unit,
     onNavigateToSettings: () -> Unit,
+    onSyncExistingNotifications: () -> Unit,
     bleService: BLEService?
 ) {
     var connectionStatus by remember { mutableStateOf("Disconnected") }
     var notifications by remember { mutableStateOf(listOf<NotificationData>()) }
     var connectedDeviceInfo by remember { mutableStateOf<ConnectedDeviceInfo?>(null) }
+    var syncStatus by remember { mutableStateOf<SyncStatus?>(null) }
     
     LaunchedEffect(bleService) {
         try {
@@ -219,6 +230,17 @@ fun MainScreen(
         try {
             bleService?.connectedDeviceInfo?.collect { deviceInfo ->
                 connectedDeviceInfo = deviceInfo
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    // NEW: Sync status tracking
+    LaunchedEffect(bleService) {
+        try {
+            bleService?.syncStatus?.collect { status ->
+                syncStatus = status
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -273,7 +295,7 @@ fun MainScreen(
                 .fillMaxSize()
                 .padding(16.dp)
         ) {
-            // Connected Device Info Card (NEW)
+            // Connected Device Info Card
             if (connectedDeviceInfo != null) {
                 ConnectedDeviceCard(
                     deviceInfo = connectedDeviceInfo!!,
@@ -282,7 +304,13 @@ fun MainScreen(
                 Spacer(modifier = Modifier.height(16.dp))
             }
 
-            // Connection Status Card
+            // Sync Status Card (NEW)
+            if (syncStatus != null) {
+                SyncStatusCard(syncStatus = syncStatus!!)
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+
+            // Connection Status Card (Updated with sync button)
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -333,7 +361,7 @@ fun MainScreen(
                         }
                     )
                     
-                    // Background Worker Status (NEW)
+                    // Background Worker Status
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(
                         verticalAlignment = Alignment.CenterVertically
@@ -355,6 +383,7 @@ fun MainScreen(
                     
                     Spacer(modifier = Modifier.height(16.dp))
                     
+                    // Main action buttons
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -374,6 +403,33 @@ fun MainScreen(
                             )
                             Spacer(Modifier.width(8.dp))
                             Text("Scan")
+                        }
+
+                        // NEW: Sync Existing button
+                        Button(
+                            onClick = onSyncExistingNotifications,
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF4CAF50)
+                            ),
+                            shape = RoundedCornerShape(12.dp),
+                            enabled = connectionStatus == "Ready" && syncStatus?.isInProgress != true
+                        ) {
+                            if (syncStatus?.isInProgress == true) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    color = Color.White,
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(
+                                    Icons.Default.Sync,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Text("Sync")
                         }
                     }
 
@@ -472,7 +528,7 @@ fun MainScreen(
                                 textAlign = TextAlign.Center
                             )
                             Text(
-                                "Make sure notification access is enabled",
+                                "Try the 'Sync' button to import existing notifications",
                                 fontSize = 14.sp,
                                 color = Color(0xFFBBBBBB),
                                 textAlign = TextAlign.Center
@@ -487,6 +543,69 @@ fun MainScreen(
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+// NEW: Sync Status Card
+@Composable
+fun SyncStatusCard(syncStatus: SyncStatus) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (syncStatus.isInProgress) Color(0xFFFFF3E0) else Color(0xFFE8F5E8)
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (syncStatus.isInProgress) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    color = Color(0xFFFF9800),
+                    strokeWidth = 3.dp
+                )
+            } else {
+                Icon(
+                    Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    modifier = Modifier.size(24.dp),
+                    tint = Color(0xFF4CAF50)
+                )
+            }
+            
+            Spacer(Modifier.width(12.dp))
+            
+            Column(
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(
+                    text = if (syncStatus.isInProgress) "Syncing existing notifications..." else "Sync completed",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color(0xFF333333)
+                )
+                
+                if (!syncStatus.isInProgress) {
+                    Text(
+                        text = "${syncStatus.sentCount}/${syncStatus.processedCount} notifications sent",
+                        fontSize = 14.sp,
+                        color = Color(0xFF666666)
+                    )
+                    
+                    val duration = (syncStatus.endTime ?: System.currentTimeMillis()) - syncStatus.startTime
+                    Text(
+                        text = "Completed in ${duration / 1000}s",
+                        fontSize = 12.sp,
+                        color = Color(0xFF888888)
+                    )
                 }
             }
         }
