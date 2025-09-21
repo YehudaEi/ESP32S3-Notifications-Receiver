@@ -23,8 +23,9 @@ class BLEService : Service() {
     private var bluetoothGatt: BluetoothGatt? = null
     private var notificationCharacteristic: BluetoothGattCharacteristic? = null
     private var connectedDevice: android.bluetooth.BluetoothDevice? = null
+    private var currentMtu = 23 // Default BLE MTU
     
-    // ESP32S3 Service and Characteristic UUIDs (customize these to match your ESP32S3)
+    // ESP32 Service and Characteristic UUIDs
     private val SERVICE_UUID = UUID.fromString("12345678-1234-1234-1234-123456789abc")
     private val CHARACTERISTIC_UUID = UUID.fromString("87654321-4321-4321-4321-cba987654321")
     
@@ -43,7 +44,6 @@ class BLEService : Service() {
     private val _connectedDeviceInfo = MutableStateFlow<ConnectedDeviceInfo?>(null)
     val connectedDeviceInfo: StateFlow<ConnectedDeviceInfo?> = _connectedDeviceInfo
 
-    // NEW: Sync status tracking
     private val _syncStatus = MutableStateFlow<SyncStatus?>(null)
     val syncStatus: StateFlow<SyncStatus?> = _syncStatus
 
@@ -51,8 +51,15 @@ class BLEService : Service() {
     private var lastConnectionTime: Long = 0
     private var totalNotificationsSent: Int = 0
 
+    // Protocol constants
+    private val CMD_ADD_NOTIFICATION: Byte = 0x01
+    private val CMD_REMOVE_NOTIFICATION: Byte = 0x02
+    private val CMD_CLEAR_ALL: Byte = 0x03
+    private val CMD_ACTION: Byte = 0x04
+
     companion object {
         private const val TAG = "BLEService"
+        private const val MAX_PACKET_SIZE = 240 // Safe packet size for most devices
     }
 
     inner class LocalBinder : Binder() {
@@ -70,7 +77,6 @@ class BLEService : Service() {
             bluetoothAdapter = bluetoothManager.adapter
             bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner
             
-            // Start periodic sync for background reliability
             NotificationWorker.startPeriodicSync(this)
             
             Log.d(TAG, "BLE Service created with background worker support")
@@ -105,9 +111,6 @@ class BLEService : Service() {
         return START_STICKY
     }
 
-    /**
-     * Trigger reading of existing notifications from NotificationListener
-     */
     fun readExistingNotifications() {
         try {
             Log.d(TAG, "Initiating existing notifications sync...")
@@ -119,7 +122,6 @@ class BLEService : Service() {
                 startTime = System.currentTimeMillis()
             )
             
-            // Send command to NotificationListener to read existing notifications
             val intent = Intent(this, NotificationListener::class.java).apply {
                 action = NotificationListener.ACTION_READ_EXISTING
             }
@@ -144,7 +146,6 @@ class BLEService : Service() {
                 
                 Log.d(TAG, "Sync completed: $sentCount/$processedCount notifications sent")
                 
-                // Clear sync status after 5 seconds
                 android.os.Handler(mainLooper).postDelayed({
                     _syncStatus.value = null
                 }, 5000)
@@ -170,7 +171,6 @@ class BLEService : Service() {
             _connectionStatus.value = "Scanning..."
             bluetoothLeScanner?.startScan(deviceDiscoveryCallback)
             
-            // Auto-stop scanning after 30 seconds
             android.os.Handler(mainLooper).postDelayed({
                 stopScanning()
             }, 30000)
@@ -231,11 +231,17 @@ class BLEService : Service() {
                     currentDevices.add(bluetoothDevice)
                     _discoveredDevices.value = currentDevices
                 } else {
-                    // Update RSSI if device already exists
                     val index = currentDevices.indexOf(existingDevice)
                     currentDevices[index] = bluetoothDevice
                     _discoveredDevices.value = currentDevices
                 }
+
+                val deviceName = device.name
+                if (deviceName?.contains("ZephyrWatch", ignoreCase = true) == true ||
+                    deviceName?.contains("ESP32", ignoreCase = true) == true) {
+                    Log.d(TAG, "Found target device: $deviceName")
+                }
+                
             } catch (e: Exception) {
                 Log.e(TAG, "Error in scan result", e)
             }
@@ -260,14 +266,12 @@ class BLEService : Service() {
                 return
             }
             
-            // Disconnect from current device if connected
             bluetoothGatt?.disconnect()
             
             _connectionStatus.value = "Connecting..."
             bluetoothGatt = device.connectGatt(this, false, gattCallback)
             connectedDevice = device
             
-            // Update connected device info
             _connectedDeviceInfo.value = ConnectedDeviceInfo(
                 name = device.name ?: "Unknown Device",
                 address = device.address,
@@ -282,33 +286,6 @@ class BLEService : Service() {
         }
     }
 
-    private val scanCallback = object : ScanCallback() {
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
-            try {
-                val device = result.device
-                
-                if (!hasBluetoothPermissions()) {
-                    return
-                }
-                
-                // Check if this is your ESP32S3 (you might want to filter by name or MAC address)
-                val deviceName = device.name
-                if (deviceName?.contains("ESP32", ignoreCase = true) == true ||
-                    deviceName?.contains("ESP32S3", ignoreCase = true) == true) {
-                    bluetoothLeScanner?.stopScan(this)
-                    connectToDevice(device)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error in scan result", e)
-            }
-        }
-
-        override fun onScanFailed(errorCode: Int) {
-            Log.e(TAG, "Scan failed with error: $errorCode")
-            _connectionStatus.value = "Scan failed: $errorCode"
-        }
-    }
-
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             try {
@@ -317,7 +294,6 @@ class BLEService : Service() {
                         _connectionStatus.value = "Connected"
                         lastConnectionTime = System.currentTimeMillis()
                         
-                        // Update connected device info
                         connectedDevice?.let { device ->
                             _connectedDeviceInfo.value = _connectedDeviceInfo.value?.copy(
                                 status = "Connected",
@@ -326,10 +302,10 @@ class BLEService : Service() {
                         }
                         
                         if (hasBluetoothPermissions()) {
-                            gatt.discoverServices()
+                            // Request larger MTU for better performance
+                            gatt.requestMtu(517) // Max MTU size
                         }
                         
-                        // Process queued notifications
                         processNotificationQueue()
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
@@ -338,6 +314,7 @@ class BLEService : Service() {
                             status = "Disconnected"
                         )
                         notificationCharacteristic = null
+                        currentMtu = 23 // Reset to default
                     }
                     BluetoothProfile.STATE_CONNECTING -> {
                         _connectionStatus.value = "Connecting..."
@@ -351,26 +328,64 @@ class BLEService : Service() {
             }
         }
 
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                currentMtu = mtu
+                Log.d(TAG, "MTU changed to: $mtu")
+                
+                // Now discover services after MTU is set
+                if (hasBluetoothPermissions()) {
+                    gatt.discoverServices()
+                }
+            } else {
+                Log.w(TAG, "MTU change failed, using default MTU")
+                currentMtu = 23
+                // Still try to discover services
+                if (hasBluetoothPermissions()) {
+                    gatt.discoverServices()
+                }
+            }
+        }
+
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             try {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
+                    Log.d(TAG, "Services discovered, looking for notification service...")
+                    
+                    gatt.services.forEach { service ->
+                        Log.d(TAG, "Found service: ${service.uuid}")
+                        service.characteristics.forEach { char ->
+                            Log.d(TAG, "  - Characteristic: ${char.uuid}")
+                        }
+                    }
+                    
                     val service = gatt.getService(SERVICE_UUID)
-                    notificationCharacteristic = service?.getCharacteristic(CHARACTERISTIC_UUID)
-                    if (notificationCharacteristic != null) {
-                        _connectionStatus.value = "Ready"
-                        _connectedDeviceInfo.value = _connectedDeviceInfo.value?.copy(
-                            status = "Ready"
-                        )
-                        
-                        // Process any queued notifications
-                        processNotificationQueue()
+                    if (service != null) {
+                        Log.d(TAG, "Found notification service!")
+                        notificationCharacteristic = service.getCharacteristic(CHARACTERISTIC_UUID)
+                        if (notificationCharacteristic != null) {
+                            _connectionStatus.value = "Ready"
+                            _connectedDeviceInfo.value = _connectedDeviceInfo.value?.copy(
+                                status = "Ready"
+                            )
+                            Log.d(TAG, "Notification characteristic found and ready! MTU: $currentMtu")
+                            processNotificationQueue()
+                        } else {
+                            Log.e(TAG, "Notification characteristic not found!")
+                            _connectionStatus.value = "Characteristic not found"
+                            _connectedDeviceInfo.value = _connectedDeviceInfo.value?.copy(
+                                status = "Characteristic not found"
+                            )
+                        }
                     } else {
+                        Log.e(TAG, "Notification service not found!")
                         _connectionStatus.value = "Service not found"
                         _connectedDeviceInfo.value = _connectedDeviceInfo.value?.copy(
                             status = "Service not found"
                         )
                     }
                 } else {
+                    Log.e(TAG, "Service discovery failed with status: $status")
                     _connectionStatus.value = "Service discovery failed"
                     _connectedDeviceInfo.value = _connectedDeviceInfo.value?.copy(
                         status = "Service discovery failed"
@@ -405,27 +420,33 @@ class BLEService : Service() {
             }
             
             if (notificationCharacteristic != null && _connectionStatus.value == "Ready") {
-                val message = "${notificationData.appName}|${notificationData.title}|${notificationData.text}"
-                notificationCharacteristic?.value = message.toByteArray()
-                bluetoothGatt?.writeCharacteristic(notificationCharacteristic)
+                // Truncate long text to fit in MTU
+                val maxDataSize = currentMtu - 3 - 5 // MTU minus ATT overhead minus our header
+                val truncatedData = truncateNotificationData(notificationData, maxDataSize)
                 
-                // Update local notifications list (only for new notifications, not existing sync)
-                if (!isExisting) {
-                    val currentList = _notifications.value.toMutableList()
-                    currentList.add(0, notificationData)
-                    if (currentList.size > 50) { // Keep only last 50 notifications
-                        currentList.removeAt(currentList.size - 1)
+                val packet = createNotificationPacket(truncatedData)
+                
+                if (packet.size <= maxDataSize) {
+                    notificationCharacteristic?.value = packet
+                    bluetoothGatt?.writeCharacteristic(notificationCharacteristic)
+                    
+                    if (!isExisting) {
+                        val currentList = _notifications.value.toMutableList()
+                        currentList.add(0, notificationData)
+                        if (currentList.size > 50) {
+                            currentList.removeAt(currentList.size - 1)
+                        }
+                        _notifications.value = currentList
                     }
-                    _notifications.value = currentList
+                    
+                    Log.d(TAG, "${if (isExisting) "Existing" else "New"} notification sent: ${truncatedData.appName} - ${truncatedData.title} (${packet.size} bytes)")
+                } else {
+                    Log.w(TAG, "Packet too large (${packet.size} bytes), skipping notification")
                 }
-                
-                Log.d(TAG, "${if (isExisting) "Existing" else "New"} notification sent: ${notificationData.appName} - ${notificationData.title}")
             } else {
-                // Queue notification if not connected (Garmin-like behavior)
                 notificationQueue.add(notificationData)
                 Log.d(TAG, "Notification queued: ${notificationData.appName} - ${notificationData.title}")
                 
-                // Try to reconnect if we have a known device
                 connectedDevice?.let { device ->
                     if (_connectionStatus.value == "Disconnected") {
                         Log.d(TAG, "Attempting reconnection for queued notification")
@@ -433,17 +454,87 @@ class BLEService : Service() {
                     }
                 }
                 
-                // Also enqueue background work for reliability (only for new notifications)
                 if (!isExisting) {
                     NotificationWorker.enqueueWork(
                         context = this,
                         notificationData = notificationData,
-                        delay = 5000 // 5 second delay
+                        delay = 5000
                     )
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error sending notification", e)
+        }
+    }
+
+    private fun truncateNotificationData(data: NotificationData, maxSize: Int): NotificationData {
+        val appNameBytes = data.appName.toByteArray(Charsets.UTF_8)
+        val titleBytes = data.title.toByteArray(Charsets.UTF_8)
+        val textBytes = data.text.toByteArray(Charsets.UTF_8)
+        
+        var appLen = minOf(appNameBytes.size, 20) // Max 20 chars for app name
+        var titleLen = minOf(titleBytes.size, 40) // Max 40 chars for title
+        var textLen = minOf(textBytes.size, maxSize - 5 - appLen - titleLen) // Remaining for text
+        
+        // Ensure we don't go negative
+        if (textLen < 0) {
+            titleLen = minOf(titleLen, maxSize - 5 - appLen - 10) // Leave at least 10 for text
+            textLen = maxSize - 5 - appLen - titleLen
+        }
+        
+        return NotificationData(
+            appName = String(appNameBytes, 0, appLen, Charsets.UTF_8),
+            title = String(titleBytes, 0, titleLen, Charsets.UTF_8),
+            text = String(textBytes, 0, maxOf(0, textLen), Charsets.UTF_8),
+            timestamp = data.timestamp,
+            isPriority = data.isPriority,
+            packageName = data.packageName
+        )
+    }
+
+    private fun createNotificationPacket(notificationData: NotificationData): ByteArray {
+        val appNameBytes = notificationData.appName.toByteArray(Charsets.UTF_8)
+        val titleBytes = notificationData.title.toByteArray(Charsets.UTF_8)
+        val textBytes = notificationData.text.toByteArray(Charsets.UTF_8)
+        
+        val appLen = appNameBytes.size
+        val titleLen = titleBytes.size
+        val textLen = textBytes.size
+        
+        val totalLength = 5 + appLen + titleLen + textLen
+        val packet = ByteArray(totalLength)
+        
+        var offset = 0
+        packet[offset++] = CMD_ADD_NOTIFICATION
+        packet[offset++] = getNotificationType(notificationData.packageName).toByte()
+        packet[offset++] = appLen.toByte()
+        packet[offset++] = titleLen.toByte()
+        packet[offset++] = textLen.toByte()
+        
+        System.arraycopy(appNameBytes, 0, packet, offset, appLen)
+        offset += appLen
+        System.arraycopy(titleBytes, 0, packet, offset, titleLen)
+        offset += titleLen
+        System.arraycopy(textBytes, 0, packet, offset, textLen)
+        
+        Log.d(TAG, "Created packet: CMD=${CMD_ADD_NOTIFICATION}, type=${getNotificationType(notificationData.packageName)}, lengths=[$appLen,$titleLen,$textLen], total=$totalLength bytes, MTU=$currentMtu")
+        
+        return packet
+    }
+
+    private fun getNotificationType(packageName: String): Int {
+        return when {
+            packageName.contains("phone", true) || packageName.contains("dialer", true) -> 0
+            packageName.contains("mms", true) || packageName.contains("message", true) || 
+            packageName.contains("sms", true) || packageName.contains("whatsapp", true) ||
+            packageName.contains("telegram", true) -> 1
+            packageName.contains("gmail", true) || packageName.contains("mail", true) ||
+            packageName.contains("email", true) -> 2
+            packageName.contains("facebook", true) || packageName.contains("instagram", true) ||
+            packageName.contains("twitter", true) || packageName.contains("snapchat", true) ||
+            packageName.contains("tiktok", true) -> 3
+            packageName.contains("calendar", true) -> 4
+            else -> 5
         }
     }
 
@@ -455,7 +546,7 @@ class BLEService : Service() {
             
             queuedNotifications.forEach { notification ->
                 sendNotificationToESP32(notification)
-                Thread.sleep(100) // Small delay between notifications
+                Thread.sleep(200) // Longer delay for reliability
             }
         }
     }
@@ -463,14 +554,12 @@ class BLEService : Service() {
     private fun checkConnectionAndSync() {
         when (_connectionStatus.value) {
             "Disconnected" -> {
-                // Try to reconnect to last known device
                 connectedDevice?.let { device ->
                     Log.d(TAG, "Sync check: attempting reconnection")
                     connectToDevice(device)
                 }
             }
             "Ready" -> {
-                // Connection is good, process any queued notifications
                 Log.d(TAG, "Sync check: processing queue")
                 processNotificationQueue()
             }
@@ -500,6 +589,14 @@ class BLEService : Service() {
             _connectedDeviceInfo.value = _connectedDeviceInfo.value?.copy(
                 notificationsSent = 0
             )
+            
+            if (notificationCharacteristic != null && _connectionStatus.value == "Ready") {
+                val packet = ByteArray(5) { 0 }
+                packet[0] = CMD_CLEAR_ALL
+                notificationCharacteristic?.value = packet
+                bluetoothGatt?.writeCharacteristic(notificationCharacteristic)
+            }
+            
             Log.d(TAG, "All notifications cleared")
         } catch (e: Exception) {
             Log.e(TAG, "Error clearing notifications", e)
