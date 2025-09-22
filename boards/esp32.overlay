@@ -1,0 +1,12 @@
+/ {
+    chosen {
+        nr,rtc = &rtc_timer;
+        nr,lcd = &gc9a01;
+        nr,lcd-backlight = &pwm_lcd0;
+        nr,wdt = &wdt0;
+    };
+};
+
+&rtc_timer {
+	status = "okay";
+};
