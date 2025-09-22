@@ -78,13 +78,6 @@ int notifications_get_unread_count(void);
  */
 void notifications_handle_timers(void);
 
-/**
- * @brief Demo function for testing status changes
- *
- * Optional function for testing different UI states
- */
-void demo_status_changes(void);
-
 #ifdef __cplusplus
 }
 #endif
