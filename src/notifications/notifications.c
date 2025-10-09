@@ -1,8 +1,11 @@
+#include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
 
 #include <lvgl.h>
 #include <zephyr/kernel.h>
 
+#include "fonts/heb_fonts.h"
 #include "notifications/notifications.h"
 
 #define SCREEN_WIDTH 240
@@ -25,6 +28,7 @@ static lv_obj_t* time_label;
 static lv_obj_t* status_circle;
 static lv_obj_t* app_icon;
 static lv_obj_t* app_name_label;
+static lv_obj_t* message_unread;
 static lv_obj_t* sender_label;
 static lv_obj_t* notification_content;
 static lv_obj_t* secondary_info;
@@ -45,8 +49,8 @@ static int current_notification = 0;
 static bool delete_pending = false;
 static int delete_pending_index = -1;
 static int delete_timer_counter = 0;
-static const int DELETE_TIMEOUT = 30; // 3 seconds (30 * 100ms)
-static lv_obj_t* undo_message;
+static const int DELETE_TIMEOUT = 20; // 3 seconds (30 * 100ms)
+static lv_obj_t* undo_arclabel; // Using lv_arclabel widget
 
 // Forward declarations
 static void update_notification_display(void);
@@ -57,6 +61,116 @@ static void delete_current_notification(void);
 static void undo_deletion(void);
 static void complete_deletion(void);
 static void handle_delete_timeout(void);
+static bool is_rtl_text(const char* text);
+static void sanitize_text_for_display(const char* input, char* output, size_t output_size);
+
+/**
+ * @brief Check if text contains Hebrew or Arabic characters (RTL languages)
+ *
+ * @param text UTF-8 encoded text to check
+ * @return true if text contains RTL characters
+ */
+static bool is_rtl_text(const char* text)
+{
+    if (!text)
+        return false;
+
+    const uint8_t* p = (const uint8_t*)text;
+
+    while (*p) {
+        // Check for Hebrew characters (U+0590 to U+05FF)
+        if (p[0] == 0xD6 || p[0] == 0xD7) {
+            if ((p[0] == 0xD6 && p[1] >= 0x90) || (p[0] == 0xD7 && p[1] <= 0xBF)) {
+                return true;
+            }
+        }
+
+        // Check for Arabic characters (U+0600 to U+06FF)
+        if (p[0] == 0xD8 || p[0] == 0xD9) {
+            return true;
+        }
+
+        // Move to next UTF-8 character
+        if ((*p & 0x80) == 0)
+            p += 1; // ASCII
+        else if ((*p & 0xE0) == 0xC0)
+            p += 2; // 2-byte
+        else if ((*p & 0xF0) == 0xE0)
+            p += 3; // 3-byte
+        else if ((*p & 0xF8) == 0xF0)
+            p += 4; // 4-byte (emoji!)
+        else
+            p += 1; // Invalid, skip
+    }
+
+    return false;
+}
+
+/**
+ * @brief Sanitize text by removing or replacing problematic characters like emoji
+ *
+ * This function filters out 4-byte UTF-8 characters (emoji and other extended Unicode)
+ * that may not be supported by custom fonts and could cause crashes.
+ *
+ * @param input Source text (UTF-8)
+ * @param output Destination buffer for sanitized text
+ * @param output_size Size of output buffer
+ */
+static void sanitize_text_for_display(const char* input, char* output, size_t output_size)
+{
+    if (!input || !output || output_size == 0)
+        return;
+
+    const uint8_t* src = (const uint8_t*)input;
+    uint8_t* dst = (uint8_t*)output;
+    size_t dst_idx = 0;
+
+    while (*src && dst_idx < output_size - 1) {
+        uint8_t byte = *src;
+
+        // ASCII - copy as-is
+        if ((byte & 0x80) == 0) {
+            dst[dst_idx++] = *src++;
+        }
+        // 2-byte UTF-8 character - copy as-is
+        else if ((byte & 0xE0) == 0xC0 && dst_idx < output_size - 2) {
+            dst[dst_idx++] = *src++;
+            if (*src)
+                dst[dst_idx++] = *src++;
+        }
+        // 3-byte UTF-8 character - copy as-is
+        else if ((byte & 0xF0) == 0xE0 && dst_idx < output_size - 3) {
+            dst[dst_idx++] = *src++;
+            if (*src)
+                dst[dst_idx++] = *src++;
+            if (*src)
+                dst[dst_idx++] = *src++;
+        }
+        // 4-byte UTF-8 character (EMOJI!) - replace with a box or skip
+        else if ((byte & 0xF8) == 0xF0) {
+            // Option 1: Replace with [?] or similar placeholder
+            if (dst_idx < output_size - 3) {
+                dst[dst_idx++] = '[';
+                dst[dst_idx++] = '?';
+                dst[dst_idx++] = ']';
+            }
+            // Skip the 4-byte emoji
+            src++;
+            if (*src)
+                src++;
+            if (*src)
+                src++;
+            if (*src)
+                src++;
+        }
+        // Invalid UTF-8 - skip
+        else {
+            src++;
+        }
+    }
+
+    dst[dst_idx] = '\0';
+}
 
 // Sample notifications for testing
 static void init_sample_notifications(void)
@@ -70,10 +184,10 @@ static void init_sample_notifications(void)
     strcpy(notifications[0].timestamp, "14:23");
     notifications[0].is_read = false;
 
-    // Notification 2: Email (long content)
+    // Notification 2: Email (Hebrew text)
     strcpy(notifications[1].app_name, "Gmail");
-    strcpy(notifications[1].sender, "Boss");
-    strcpy(notifications[1].content, "Meeting tomorrow at 9 AM. Please prepare the quarterly report and bring all necessary documents. This is very important for our Q4 planning.");
+    strcpy(notifications[1].sender, "משה כהן");
+    strcpy(notifications[1].content, "בדיקה של הודעה בעברית משהו משהו.");
     strcpy(notifications[1].timestamp, "13:45");
     notifications[1].is_read = false;
 
@@ -91,10 +205,10 @@ static void init_sample_notifications(void)
     strcpy(notifications[3].timestamp, "11:15");
     notifications[3].is_read = false;
 
-    // Notification 5: Telegram
+    // Notification 5: Telegram (with emoji that will be sanitized)
     strcpy(notifications[4].app_name, "Telegram");
     strcpy(notifications[4].sender, "Sarah");
-    strcpy(notifications[4].content, "Check this out! 😄");
+    strcpy(notifications[4].content, "Check this out 🚀!");
     strcpy(notifications[4].timestamp, "10:45");
     notifications[4].is_read = false;
 }
@@ -122,26 +236,26 @@ static void create_styles(void)
     // Time label style
     static lv_style_t time_style;
     lv_style_init(&time_style);
-    lv_style_set_text_font(&time_style, &lv_font_montserrat_16);
+    lv_style_set_text_font(&time_style, &heb_font_16);
     lv_style_set_text_color(&time_style, lv_color_hex(0xFFFFFF));
 
     // App name style
     static lv_style_t app_name_style;
     lv_style_init(&app_name_style);
-    lv_style_set_text_font(&app_name_style, &lv_font_montserrat_12);
+    lv_style_set_text_font(&app_name_style, &heb_font_12);
     lv_style_set_text_color(&app_name_style, lv_color_hex(0xC8C8C8));
 
     // Main content style
     static lv_style_t content_style;
     lv_style_init(&content_style);
-    lv_style_set_text_font(&content_style, &lv_font_montserrat_14);
+    lv_style_set_text_font(&content_style, &heb_font_16);
     lv_style_set_text_color(&content_style, lv_color_hex(0xFFFFFF));
     lv_style_set_text_align(&content_style, LV_TEXT_ALIGN_CENTER);
 
     // Secondary info style
     static lv_style_t secondary_style;
     lv_style_init(&secondary_style);
-    lv_style_set_text_font(&secondary_style, &lv_font_montserrat_10);
+    lv_style_set_text_font(&secondary_style, &heb_font_10);
     lv_style_set_text_color(&secondary_style, lv_color_hex(0x969696));
 }
 
@@ -183,7 +297,9 @@ static void screen_event_handler(lv_event_t* e)
             undo_deletion();
         }
     } else if (code == LV_EVENT_DOUBLE_CLICKED) {
-        mark_current_as_read(); // Mark as read
+        if (!delete_pending) {
+            mark_current_as_read(); // Mark as read
+        }
     }
 }
 
@@ -246,8 +362,15 @@ static void create_app_info(void)
     // App name (centered in container)
     app_name_label = lv_label_create(app_container);
     lv_obj_align(app_name_label, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_text_font(app_name_label, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(app_name_label, &heb_font_12, 0);
     lv_obj_set_style_text_color(app_name_label, lv_color_hex(0xC8C8C8), 0);
+
+    message_unread = lv_obj_create(app_container);
+    lv_obj_set_size(message_unread, 10, 10);
+    lv_obj_align(message_unread, LV_ALIGN_RIGHT_MID, -15, 0);
+    lv_obj_set_style_radius(message_unread, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(message_unread, status_colors[CONN_WEAK_SIGNAL], 0);
+    lv_obj_set_style_border_opa(message_unread, LV_OPA_TRANSP, 0);
 }
 
 static void create_notification_content(void)
@@ -263,7 +386,7 @@ static void create_notification_content(void)
     // Sender name
     sender_label = lv_label_create(content_container);
     lv_obj_align(sender_label, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_text_font(sender_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(sender_label, &heb_font_16, 0);
     lv_obj_set_style_text_color(sender_label, lv_color_hex(0xFFFFFF), 0);
 
     // Message content
@@ -271,8 +394,8 @@ static void create_notification_content(void)
     lv_label_set_long_mode(notification_content, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(notification_content, SCREEN_WIDTH - 50);
     lv_obj_align_to(notification_content, sender_label, LV_ALIGN_OUT_BOTTOM_MID, 0, 8);
-    lv_obj_set_style_text_align(notification_content, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(notification_content, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_align(notification_content, LV_TEXT_ALIGN_AUTO, 0);
+    lv_obj_set_style_text_font(notification_content, &heb_font_16, 0);
     lv_obj_set_style_text_color(notification_content, lv_color_hex(0xE0E0E0), 0);
 }
 
@@ -281,22 +404,33 @@ static void create_bottom_info(void)
     // Secondary information (timestamp, etc.)
     secondary_info = lv_label_create(main_screen);
     lv_obj_align(secondary_info, LV_ALIGN_BOTTOM_MID, 0, -35);
-    lv_obj_set_style_text_font(secondary_info, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(secondary_info, &heb_font_10, 0);
     lv_obj_set_style_text_color(secondary_info, lv_color_hex(0x969696), 0);
 
     // Counter (shows current/total)
     counter_label = lv_label_create(main_screen);
     lv_obj_align(counter_label, LV_ALIGN_BOTTOM_MID, 0, -20);
-    lv_obj_set_style_text_font(counter_label, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(counter_label, &heb_font_10, 0);
     lv_obj_set_style_text_color(counter_label, lv_color_hex(0x969696), 0);
 
-    // Undo message (initially hidden)
-    undo_message = lv_label_create(main_screen);
-    lv_label_set_text(undo_message, "Deleted. Tap to undo");
-    lv_obj_align(undo_message, LV_ALIGN_BOTTOM_MID, 0, -5);
-    lv_obj_set_style_text_font(undo_message, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(undo_message, lv_color_hex(0xFFAA00), 0);
-    lv_obj_add_flag(undo_message, LV_OBJ_FLAG_HIDDEN); // Hidden by default
+    // Undo message using LVGL arclabel widget
+    undo_arclabel = lv_arclabel_create(main_screen);
+    lv_arclabel_set_text(undo_arclabel, "Deleting... Tap to cancel");
+    lv_arclabel_set_angle_start(undo_arclabel, 180);
+    lv_arclabel_set_angle_size(undo_arclabel, 180);
+    lv_arclabel_set_dir(undo_arclabel, LV_ARCLABEL_DIR_CLOCKWISE);
+    lv_arclabel_set_radius(undo_arclabel, SCREEN_RADIUS - 15);
+    lv_arclabel_set_center_offset_y(undo_arclabel, 0);
+    lv_arclabel_set_text_vertical_align(undo_arclabel, LV_ARCLABEL_TEXT_ALIGN_CENTER);
+    lv_arclabel_set_text_horizontal_align(undo_arclabel, LV_ARCLABEL_TEXT_ALIGN_CENTER);
+    lv_arclabel_set_recolor(undo_arclabel, true);
+    lv_obj_set_style_text_font(undo_arclabel, &heb_font_16, 0);
+    lv_obj_set_style_text_color(undo_arclabel, lv_color_hex(0xFFAA00), 0);
+    lv_obj_set_size(undo_arclabel, lv_obj_get_width(main_screen), lv_obj_get_height(main_screen));
+    lv_obj_center(undo_arclabel);
+    lv_obj_set_style_bg_color(undo_arclabel, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(undo_arclabel, LV_OPA_40, 0);
+    lv_obj_add_flag(undo_arclabel, LV_OBJ_FLAG_HIDDEN); // Hidden by default
 }
 
 static void update_connection_status(connection_status_t status)
@@ -317,6 +451,7 @@ static void update_notification_display(void)
         lv_label_set_text(notification_content, "All clear!");
         lv_label_set_text(secondary_info, "");
         lv_label_set_text(counter_label, "");
+        lv_obj_add_flag(message_unread, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_style_bg_color(app_icon, lv_color_hex(0x666666), 0);
         return;
     }
@@ -327,40 +462,41 @@ static void update_notification_display(void)
     lv_label_set_text(app_name_label, notif->app_name);
     lv_obj_set_style_bg_color(app_icon, get_app_color(notif->app_name), 0);
 
-    // Update sender (add indicator for unread)
-    static char sender_text[70];
-    snprintf(sender_text, sizeof(sender_text), "%s%s",
-        notif->is_read ? "" : "● ", notif->sender);
-    lv_label_set_text(sender_label, sender_text);
-
-    // Set sender color based on read status and delete pending
-    lv_color_t sender_color;
-    if (delete_pending && delete_pending_index == current_notification) {
-        sender_color = lv_color_hex(0x666666); // Grayed out for pending deletion
+    // Update sender with RTL support
+    if (is_rtl_text(notif->sender)) {
+        lv_obj_set_style_base_dir(sender_label, LV_BASE_DIR_RTL, 0);
     } else {
-        sender_color = notif->is_read ? lv_color_hex(0xC8C8C8) : lv_color_hex(0xFFFFFF);
+        lv_obj_set_style_base_dir(sender_label, LV_BASE_DIR_LTR, 0);
     }
-    lv_obj_set_style_text_color(sender_label, sender_color, 0);
+    lv_label_set_text(sender_label, notif->sender);
 
-    // Update content with dimmed appearance if delete pending
-    lv_label_set_text(notification_content, notif->content);
-    if (delete_pending && delete_pending_index == current_notification) {
-        lv_obj_set_style_text_color(notification_content, lv_color_hex(0x666666), 0);
+    // Update read state
+    if (notif->is_read) {
+        lv_obj_add_flag(message_unread, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_obj_set_style_text_color(notification_content, lv_color_hex(0xE0E0E0), 0);
+        lv_obj_clear_flag(message_unread, LV_OBJ_FLAG_HIDDEN);
     }
+
+    // Sanitize and update content with RTL support
+    static char sanitized_content[256];
+    sanitize_text_for_display(notif->content, sanitized_content, sizeof(sanitized_content));
+
+    if (is_rtl_text(sanitized_content)) {
+        lv_obj_set_style_base_dir(notification_content, LV_BASE_DIR_RTL, 0);
+        lv_obj_set_style_text_align(notification_content, LV_TEXT_ALIGN_RIGHT, 0);
+    } else {
+        lv_obj_set_style_base_dir(notification_content, LV_BASE_DIR_LTR, 0);
+        lv_obj_set_style_text_align(notification_content, LV_TEXT_ALIGN_LEFT, 0);
+    }
+    lv_label_set_text(notification_content, sanitized_content);
 
     // Update secondary info
     lv_label_set_text(secondary_info, notif->timestamp);
 
     // Update counter
     static char counter_text[20];
-    int display_count = notification_count;
-    if (delete_pending)
-        display_count--; // Show count as if item is already deleted
-
     snprintf(counter_text, sizeof(counter_text), "%d of %d",
-        current_notification + 1, display_count > 0 ? display_count : notification_count);
+        current_notification + 1, notification_count);
     lv_label_set_text(counter_label, counter_text);
 }
 
@@ -399,18 +535,8 @@ static void delete_current_notification(void)
     delete_timer_counter = 0;
 
     // Show undo message
-    lv_obj_clear_flag(undo_message, LV_OBJ_FLAG_HIDDEN);
-
-    // Move to next notification for preview (but don't actually delete yet)
-    if (notification_count > 1) {
-        if (current_notification >= notification_count - 1) {
-            current_notification = 0;
-        } else {
-            current_notification++;
-        }
-    }
-
-    update_notification_display();
+    lv_obj_clear_flag(undo_arclabel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(undo_arclabel);
 }
 
 static void undo_deletion(void)
@@ -421,7 +547,7 @@ static void undo_deletion(void)
         delete_timer_counter = 0;
 
         // Hide undo message
-        lv_obj_add_flag(undo_message, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(undo_arclabel, LV_OBJ_FLAG_HIDDEN);
 
         // Refresh display
         update_notification_display();
@@ -443,12 +569,10 @@ static void complete_deletion(void)
     notification_count--;
 
     // Adjust current notification index
-    if (current_notification >= notification_count && notification_count > 0) {
-        current_notification = notification_count - 1;
-    } else if (notification_count == 0) {
+    if (notification_count == 0) {
         current_notification = 0;
-    } else if (current_notification > index_to_delete) {
-        current_notification--;
+    } else if (current_notification >= notification_count) {
+        current_notification = notification_count - 1;
     }
 
     // Clear delete pending state
@@ -457,8 +581,9 @@ static void complete_deletion(void)
     delete_timer_counter = 0;
 
     // Hide undo message
-    lv_obj_add_flag(undo_message, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(undo_arclabel, LV_OBJ_FLAG_HIDDEN);
 
+    // Update display
     update_notification_display();
 }
 
@@ -472,7 +597,7 @@ static void handle_delete_timeout(void)
     }
 }
 
-// Public API functions for external use
+// Public API functions
 void notifications_update_connection_status(connection_status_t status)
 {
     update_connection_status(status);
@@ -500,9 +625,17 @@ void notifications_add_notification(const char* app_name, const char* sender,
     // Add new notification
     notification_t* new_notif = &notifications[notification_count];
     strncpy(new_notif->app_name, app_name, sizeof(new_notif->app_name) - 1);
+    new_notif->app_name[sizeof(new_notif->app_name) - 1] = '\0';
+
     strncpy(new_notif->sender, sender, sizeof(new_notif->sender) - 1);
+    new_notif->sender[sizeof(new_notif->sender) - 1] = '\0';
+
     strncpy(new_notif->content, content, sizeof(new_notif->content) - 1);
+    new_notif->content[sizeof(new_notif->content) - 1] = '\0';
+
     strncpy(new_notif->timestamp, timestamp, sizeof(new_notif->timestamp) - 1);
+    new_notif->timestamp[sizeof(new_notif->timestamp) - 1] = '\0';
+
     new_notif->is_read = false;
 
     notification_count++;
@@ -528,7 +661,6 @@ int notifications_get_unread_count(void)
     return count;
 }
 
-// Call this in your main loop to handle delete timeouts
 void notifications_handle_timers(void)
 {
     handle_delete_timeout();
@@ -543,7 +675,7 @@ void create_notification_screen(void)
     main_screen = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(main_screen, lv_color_hex(0x000000), 0);
 
-    // Create styles (this initializes color arrays)
+    // Create styles
     create_styles();
 
     // Create UI components
@@ -564,7 +696,6 @@ void create_notification_screen(void)
     lv_scr_load(main_screen);
 }
 
-// Demo function for testing (optional - remove in production)
 void demo_status_changes(void)
 {
     static connection_status_t current_status = CONN_CONNECTED;
@@ -584,7 +715,6 @@ void demo_status_changes(void)
             update_connection_status(current_status);
             break;
         case 1: {
-            // Update time
             static char time_buf[10];
             int hours = 14 + (demo_step / 8) % 10;
             int minutes = 23 + (demo_step * 7) % 60;
@@ -592,13 +722,11 @@ void demo_status_changes(void)
             update_time(time_buf);
         } break;
         case 2:
-            // Add a new notification
             notifications_add_notification("Instagram", "Alice", "Liked your photo!", "now");
             break;
         case 3:
         case 4:
         case 5:
-            // Let user interact manually
             break;
         }
         demo_step++;

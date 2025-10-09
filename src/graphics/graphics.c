@@ -8,6 +8,7 @@
  * - LV_NO_TASK_READY -> LV_NO_TIMER_READY
  * - Display driver API completely changed
  * - Input device API simplified
+ * - Buffer alignment requirements
  *
  * @author Yehuda@YehudaE.net
  */
@@ -33,8 +34,8 @@ LOG_MODULE_REGISTER(graphics, LOG_LEVEL_INF);
 /** @brief LVGL task handler stack size */
 #define LVGL_THREAD_STACK_SIZE 4096
 
-/* Static display buffer for LVGL */
-static lv_color_t lvgl_display_buf[LVGL_BUFFER_SIZE];
+/* Static display buffer for LVGL - MUST be properly aligned for LVGL 9.x */
+static lv_color_t lvgl_display_buf[LVGL_BUFFER_SIZE] __aligned(4);
 
 /* Display object pointer */
 static lv_display_t* lvgl_display = NULL;
@@ -181,7 +182,7 @@ static int init_lvgl_display(void)
         lv_palette_main(LV_PALETTE_ORANGE), true, LV_FONT_DEFAULT);
     lv_display_set_theme(lvgl_display, theme);
 
-    /* Set display buffer - LVGL way */
+    /* Set display buffer - LVGL 9.x way with aligned buffer */
     lv_display_set_buffers(lvgl_display, lvgl_display_buf, NULL,
         sizeof(lvgl_display_buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
 
@@ -206,7 +207,7 @@ static int init_lvgl_input(void)
 
     LOG_INF("Initializing LVGL input device...");
 
-    /* Create input device - LVGL way */
+    /* Create input device - LVGL 9.x way */
     indev = lv_indev_create();
     if (!indev) {
         LOG_ERR("Failed to create input device");
@@ -234,7 +235,7 @@ static void create_initial_ui(void)
 }
 
 /**
- * @brief Initialize LVGL graphics library (LVGL compatible)
+ * @brief Initialize LVGL graphics library (LVGL 9.x compatible)
  *
  * Complete initialization of LVGL including:
  * - Core LVGL initialization
@@ -252,8 +253,8 @@ int init_lvgl_graphics(void)
     LOG_INF("Initializing LVGL graphics library");
 
     /* Initialize LVGL core */
-    lv_init();
-    LOG_DBG("LVGL core initialized");
+    // lv_init();
+    // LOG_DBG("LVGL core initialized");
 
     /* Initialize display driver */
     ret = init_lvgl_display();
@@ -315,7 +316,7 @@ int deinit_lvgl_graphics(void)
         k_thread_abort(lvgl_thread_tid);
     }
 
-/* Clean up LVGL - LVGL */
+/* Clean up LVGL - LVGL 9.x */
 #if LV_VERSION_CHECK(9, 0, 0)
     lv_deinit();
 #endif
