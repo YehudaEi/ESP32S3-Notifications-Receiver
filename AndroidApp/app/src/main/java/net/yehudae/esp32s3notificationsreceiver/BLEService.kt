@@ -237,7 +237,7 @@ class BLEService : Service() {
                 }
 
                 val deviceName = device.name
-                if (deviceName?.contains("ZephyrWatch", ignoreCase = true) == true ||
+                if (deviceName?.contains("YNotificator", ignoreCase = true) == true ||
                     deviceName?.contains("ESP32", ignoreCase = true) == true) {
                     Log.d(TAG, "Found target device: $deviceName")
                 }

@@ -3,6 +3,7 @@
 #include <lvgl.h>
 #include <zephyr/kernel.h>
 
+#include "fonts/heb_fonts.h"
 #include "notifications/notifications.h"
 
 #define SCREEN_WIDTH 240
@@ -72,8 +73,8 @@ static void init_sample_notifications(void)
 
     // Notification 2: Email (long content)
     strcpy(notifications[1].app_name, "Gmail");
-    strcpy(notifications[1].sender, "Boss");
-    strcpy(notifications[1].content, "Meeting tomorrow at 9 AM. Please prepare the quarterly report and bring all necessary documents. This is very important for our Q4 planning.");
+    strcpy(notifications[1].sender, "משה כהן");
+    strcpy(notifications[1].content, "בדיקה של הודעה בעברית משהו משהו.");
     strcpy(notifications[1].timestamp, "13:45");
     notifications[1].is_read = false;
 
@@ -122,26 +123,26 @@ static void create_styles(void)
     // Time label style
     static lv_style_t time_style;
     lv_style_init(&time_style);
-    lv_style_set_text_font(&time_style, &lv_font_montserrat_16);
+    lv_style_set_text_font(&time_style, &heb_font_16);
     lv_style_set_text_color(&time_style, lv_color_hex(0xFFFFFF));
 
     // App name style
     static lv_style_t app_name_style;
     lv_style_init(&app_name_style);
-    lv_style_set_text_font(&app_name_style, &lv_font_montserrat_12);
+    lv_style_set_text_font(&app_name_style, &heb_font_12);
     lv_style_set_text_color(&app_name_style, lv_color_hex(0xC8C8C8));
 
     // Main content style
     static lv_style_t content_style;
     lv_style_init(&content_style);
-    lv_style_set_text_font(&content_style, &lv_font_montserrat_14);
+    lv_style_set_text_font(&content_style, &heb_font_16);
     lv_style_set_text_color(&content_style, lv_color_hex(0xFFFFFF));
     lv_style_set_text_align(&content_style, LV_TEXT_ALIGN_CENTER);
 
     // Secondary info style
     static lv_style_t secondary_style;
     lv_style_init(&secondary_style);
-    lv_style_set_text_font(&secondary_style, &lv_font_montserrat_10);
+    lv_style_set_text_font(&secondary_style, &heb_font_10);
     lv_style_set_text_color(&secondary_style, lv_color_hex(0x969696));
 }
 
@@ -246,7 +247,7 @@ static void create_app_info(void)
     // App name (centered in container)
     app_name_label = lv_label_create(app_container);
     lv_obj_align(app_name_label, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_text_font(app_name_label, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(app_name_label, &heb_font_12, 0);
     lv_obj_set_style_text_color(app_name_label, lv_color_hex(0xC8C8C8), 0);
 }
 
@@ -263,7 +264,7 @@ static void create_notification_content(void)
     // Sender name
     sender_label = lv_label_create(content_container);
     lv_obj_align(sender_label, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_text_font(sender_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(sender_label, &heb_font_16, 0);
     lv_obj_set_style_text_color(sender_label, lv_color_hex(0xFFFFFF), 0);
 
     // Message content
@@ -272,7 +273,7 @@ static void create_notification_content(void)
     lv_obj_set_width(notification_content, SCREEN_WIDTH - 50);
     lv_obj_align_to(notification_content, sender_label, LV_ALIGN_OUT_BOTTOM_MID, 0, 8);
     lv_obj_set_style_text_align(notification_content, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(notification_content, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(notification_content, &heb_font_16, 0);
     lv_obj_set_style_text_color(notification_content, lv_color_hex(0xE0E0E0), 0);
 }
 
@@ -281,20 +282,20 @@ static void create_bottom_info(void)
     // Secondary information (timestamp, etc.)
     secondary_info = lv_label_create(main_screen);
     lv_obj_align(secondary_info, LV_ALIGN_BOTTOM_MID, 0, -35);
-    lv_obj_set_style_text_font(secondary_info, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(secondary_info, &heb_font_10, 0);
     lv_obj_set_style_text_color(secondary_info, lv_color_hex(0x969696), 0);
 
     // Counter (shows current/total)
     counter_label = lv_label_create(main_screen);
     lv_obj_align(counter_label, LV_ALIGN_BOTTOM_MID, 0, -20);
-    lv_obj_set_style_text_font(counter_label, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(counter_label, &heb_font_10, 0);
     lv_obj_set_style_text_color(counter_label, lv_color_hex(0x969696), 0);
 
     // Undo message (initially hidden)
     undo_message = lv_label_create(main_screen);
     lv_label_set_text(undo_message, "Deleted. Tap to undo");
     lv_obj_align(undo_message, LV_ALIGN_BOTTOM_MID, 0, -5);
-    lv_obj_set_style_text_font(undo_message, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(undo_message, &heb_font_12, 0);
     lv_obj_set_style_text_color(undo_message, lv_color_hex(0xFFAA00), 0);
     lv_obj_add_flag(undo_message, LV_OBJ_FLAG_HIDDEN); // Hidden by default
 }
@@ -330,7 +331,7 @@ static void update_notification_display(void)
     // Update sender (add indicator for unread)
     static char sender_text[70];
     snprintf(sender_text, sizeof(sender_text), "%s%s",
-        notif->is_read ? "" : "● ", notif->sender);
+        notif->is_read ? "" : "• ", notif->sender);
     lv_label_set_text(sender_label, sender_text);
 
     // Set sender color based on read status and delete pending

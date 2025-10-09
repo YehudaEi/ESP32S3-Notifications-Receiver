@@ -2,12 +2,12 @@
  * @file main.c
  * @brief Notifications Receiver Main Application
  *
- * This is the main application file for ZephyrWatch - a Zephyr RTOS based
- * smartwatch device that receives notifications from Android apps or web browsers
+ * This is the main application file for YNotificator - a Zephyr RTOS based
+ * notification receiver that gets notifications from Android apps
  * via Bluetooth Low Energy (BLE).
  *
  * The application manages:
- * - System initialization (watchdog, display, GUI)
+ * - System initialization (watchdog, display, GUI, BLE)
  * - Main event loop with LVGL graphics processing
  * - Watchdog maintenance for system stability
  * - BLE communication for notification reception
@@ -20,6 +20,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/reboot.h>
 
+#include "bluetooth/bluetooth.h"
 #include "display/display.h"
 #include "graphics/graphics.h"
 #include "notifications/notifications.h"
@@ -32,16 +33,32 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 #define MAIN_THREAD_SLEEP_TIME_MS 100
 
 /** @brief Application name for logging and identification */
-#define APP_DEVICE_NAME "ZephyrWatch"
-
-/** @brief BLE service UUID for notification service */
-#define BLE_SERVICE_UUID "12345678-1234-1234-1234-123456789abc"
-
-/** @brief BLE characteristic UUID for notification data */
-#define BLE_CHARACTERISTIC_UUID "87654321-4321-4321-4321-cba987654321"
+#define APP_DEVICE_NAME "YNotificator"
 
 /** @brief Maximum number of initialization retry attempts */
 #define MAX_INIT_RETRIES 3
+
+/*==============================================================================
+ * ERROR CALLBACKS (Empty implementations as requested)
+ *============================================================================*/
+
+static void on_malformed_packet(const char* error_msg)
+{
+    LOG_WRN("Malformed packet: %s", error_msg);
+    /* Empty callback - future implementation */
+}
+
+static void on_connection_drop(const char* error_msg)
+{
+    LOG_WRN("Connection dropped: %s", error_msg);
+    /* Empty callback - future implementation */
+}
+
+static void on_buffer_overflow(const char* error_msg)
+{
+    LOG_ERR("Buffer overflow: %s", error_msg);
+    /* Empty callback - future implementation */
+}
 
 /**
  * @brief Initialize system watchdog
@@ -116,21 +133,27 @@ static int init_display_subsystem(void)
  * @brief Initialize BLE communication
  *
  * Sets up Bluetooth Low Energy stack for receiving notifications from
- * connected devices (Android apps, web browsers, etc.).
+ * connected Android devices.
  *
  * @return 0 on success, negative error code on failure
  */
 static int init_ble_communication(void)
 {
+    int ret;
+
     LOG_INF("Initializing BLE communication...");
 
-    /* TODO: Add actual BLE initialization code here */
-    /* This would typically include:
-     * - bt_enable()
-     * - Service and characteristic registration
-     * - Advertising configuration
-     * - Connection callbacks setup
-     */
+    /* Initialize BLE */
+    ret = init_bluetooth();
+    if (ret != 0) {
+        LOG_ERR("BLE initialization failed, ret = %d", ret);
+        return ret;
+    }
+
+    /* Register error callbacks */
+    register_malformed_packet_callback(on_malformed_packet);
+    register_connection_drop_callback(on_connection_drop);
+    register_buffer_overflow_callback(on_buffer_overflow);
 
     LOG_INF("BLE communication initialized successfully");
     return 0;
@@ -144,12 +167,11 @@ static int init_ble_communication(void)
  */
 static void print_system_info(void)
 {
-    LOG_INF("=== %s Notifications Receiver Ready! ===", APP_DEVICE_NAME);
+    LOG_INF("=== %s Ready! ===", APP_DEVICE_NAME);
     LOG_INF("Device name: %s", APP_DEVICE_NAME);
-    LOG_INF("Service UUID: %s", BLE_SERVICE_UUID);
-    LOG_INF("Characteristic UUID: %s", BLE_CHARACTERISTIC_UUID);
     LOG_INF("Main loop interval: %d ms", MAIN_THREAD_SLEEP_TIME_MS);
-    LOG_INF("Ready to receive notifications from Android app or web browser!");
+    LOG_INF("Ready to receive notifications via BLE!");
+    LOG_INF("Advertising and waiting for Android connection...");
 }
 
 /**
@@ -161,17 +183,13 @@ static void shutdown_system(void)
 {
     LOG_INF("Initiating system shutdown sequence...");
 
+    /* Stop BLE advertising */
+    stop_advertising();
+
     /* Disable display to save power and protect screen */
     if (disable_display() != 0) {
         LOG_WRN("Failed to properly disable display during shutdown");
     }
-
-    /* TODO: Add other cleanup tasks:
-     * - Save configuration to flash
-     * - Disconnect BLE connections
-     * - Stop running timers
-     * - Close file handles
-     */
 
     LOG_INF("System shutdown sequence completed");
 }
@@ -184,7 +202,6 @@ static void shutdown_system(void)
  * - LVGL graphics processing
  * - Notification timers
  * - Watchdog maintenance
- * - Power management
  * - BLE communication processing
  *
  * @return 0 on normal exit (should not happen), error code on failure
@@ -193,7 +210,7 @@ int main(void)
 {
     int ret;
 
-    LOG_INF("Starting %s Notifications Receiver", APP_DEVICE_NAME);
+    LOG_INF("Starting %s Notification Receiver", APP_DEVICE_NAME);
 
     /* Initialize critical system components */
 
