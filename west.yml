@@ -1,0 +1,21 @@
+manifest:
+  version: "0.13"
+
+  defaults:
+    remote: upstream
+
+  remotes:
+    - name: upstream
+      url-base: https://github.com/zephyrproject-rtos
+
+  projects:
+    - name: zephyr
+      remote: upstream
+      revision: v4.2.1
+      import:
+        name-allowlist:
+          - cmsis
+          - hal_espressif
+          - hal_esp32
+          - lvgl
+          - mbedtls
