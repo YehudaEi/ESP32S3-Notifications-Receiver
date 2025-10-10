@@ -49,7 +49,8 @@ typedef enum {
     CMD_ADD_NOTIFICATION = 0x01,
     CMD_REMOVE_NOTIFICATION = 0x02,
     CMD_CLEAR_ALL = 0x03,
-    CMD_ACTION = 0x04
+    CMD_ACTION = 0x04,
+    CMD_TIME_SYNC = 0x05
 } ble_command_t;
 
 /** @brief Notification packet structure */

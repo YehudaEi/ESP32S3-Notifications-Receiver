@@ -7,9 +7,10 @@
  * via Bluetooth Low Energy (BLE).
  *
  * The application manages:
- * - System initialization (watchdog, display, GUI, BLE)
+ * - System initialization (watchdog, RTC, display, GUI, BLE)
  * - Main event loop with LVGL graphics processing
  * - Watchdog maintenance for system stability
+ * - Time synchronization and display updates
  * - BLE communication for notification reception
  *
  * @author Yehuda@YehudaE.net
@@ -24,6 +25,7 @@
 #include "display/display.h"
 #include "graphics/graphics.h"
 #include "notifications/notifications.h"
+#include "rtc/rtc.h"
 #include "watchdog/watchdog.h"
 
 /* Register logging module */
@@ -61,6 +63,27 @@ static void on_buffer_overflow(const char* error_msg)
 }
 
 /**
+ * @brief Update time displays
+ *
+ * Updates the top bar time and notification relative timestamps.
+ * Should be called periodically from main loop.
+ */
+static void update_time_displays(void)
+{
+    static uint32_t last_time_update = 0;
+    uint32_t now = k_uptime_get_32();
+
+    /* Update top bar time every minute (60000 ms) */
+    if (now - last_time_update >= 60000) {
+        char time_str[16];
+        if (rtc_format_time(time_str, sizeof(time_str)) == 0) {
+            notifications_update_time(time_str);
+        }
+        last_time_update = now;
+    }
+}
+
+/**
  * @brief Initialize system watchdog
  *
  * Sets up and enables the hardware watchdog timer to ensure system stability.
@@ -93,6 +116,29 @@ static int init_system_watchdog(void)
 
     LOG_ERR("Failed to initialize watchdog after %d attempts", MAX_INIT_RETRIES);
     return ret;
+}
+
+/**
+ * @brief Initialize RTC subsystem
+ *
+ * Sets up the Real-Time Clock for time keeping.
+ *
+ * @return 0 on success, negative error code on failure
+ */
+static int init_rtc_subsystem(void)
+{
+    int ret;
+
+    LOG_INF("Initializing RTC subsystem...");
+
+    ret = ENR_rtc_init();
+    if (ret != 0) {
+        LOG_ERR("RTC initialization failed, ret = %d", ret);
+        return ret;
+    }
+
+    LOG_INF("RTC initialized successfully (time will sync via BLE)");
+    return 0;
 }
 
 /**
@@ -172,6 +218,7 @@ static void print_system_info(void)
     LOG_INF("Main loop interval: %d ms", MAIN_THREAD_SLEEP_TIME_MS);
     LOG_INF("Ready to receive notifications via BLE!");
     LOG_INF("Advertising and waiting for Android connection...");
+    LOG_INF("Time will sync automatically when connected");
 }
 
 /**
@@ -200,6 +247,7 @@ static void shutdown_system(void)
  * Initializes all system components and runs the main application loop.
  * The main loop handles:
  * - LVGL graphics processing
+ * - Time display updates
  * - Notification timers
  * - Watchdog maintenance
  * - BLE communication processing
@@ -221,29 +269,36 @@ int main(void)
         goto error_exit;
     }
 
-    /* 2. Initialize display subsystem */
+    /* 2. Initialize RTC subsystem */
+    ret = init_rtc_subsystem();
+    if (ret != 0) {
+        LOG_ERR("Critical: RTC initialization failed, ret = %d", ret);
+        goto error_exit;
+    }
+
+    /* 3. Initialize display subsystem */
     ret = init_display_subsystem();
     if (ret != 0) {
         LOG_ERR("Critical: Display initialization failed, ret = %d", ret);
         goto error_exit;
     }
 
-    /* 3. Initialize LVGL graphics library */
+    /* 4. Initialize LVGL graphics library */
     ret = init_lvgl_graphics();
     if (ret != 0) {
         LOG_ERR("Critical: LVGL initialization failed, ret = %d", ret);
         goto error_exit;
     }
 
-    /* 4. Wait a moment for LVGL to be fully ready */
+    /* 5. Wait a moment for LVGL to be fully ready */
     k_sleep(K_MSEC(100));
 
-    /* 5. Create the notification screen */
+    /* 6. Create the notification screen */
     LOG_INF("Creating notification screen...");
     create_notification_screen();
     LOG_INF("Notification screen created successfully");
 
-    /* 6. Initialize BLE communication */
+    /* 7. Initialize BLE communication */
     ret = init_ble_communication();
     if (ret != 0) {
         LOG_ERR("Critical: BLE initialization failed, ret = %d", ret);
@@ -257,7 +312,10 @@ int main(void)
     LOG_INF("Entering main application loop...");
 
     while (true) {
-        /* Handle notification timers (delete timeout, etc.) */
+        /* Update time displays (top bar and timestamps) */
+        update_time_displays();
+
+        /* Handle notification timers (delete timeout and timestamp updates) */
         notifications_handle_timers();
 
         /* Maintain watchdog to prevent system reset */

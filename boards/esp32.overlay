@@ -8,5 +8,6 @@
 };
 
 &rtc_timer {
+    compatible = "espressif,esp32-rtc-timer";
 	status = "okay";
 };

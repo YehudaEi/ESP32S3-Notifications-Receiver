@@ -11,6 +11,7 @@
 #include "bluetooth/bluetooth.h"
 #include "bluetooth/pairing_screen.h"
 #include "notifications/notifications.h"
+#include "rtc/rtc.h"
 
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
@@ -323,7 +324,7 @@ static ssize_t on_notification_write(struct bt_conn* conn, const struct bt_gatt_
 
 static void parse_notification_packet(const uint8_t* data, size_t len)
 {
-    if (len < 5) {
+    if (len < 1) {
         LOG_ERR("Malformed packet: too short (%zu bytes)", len);
         if (malformed_packet_cb) {
             malformed_packet_cb("Packet too short");
@@ -332,31 +333,73 @@ static void parse_notification_packet(const uint8_t* data, size_t len)
     }
 
     ble_command_t cmd = (ble_command_t)data[0];
-    notification_type_t type = (notification_type_t)data[1];
-    uint8_t app_len = data[2];
-    uint8_t title_len = data[3];
-    uint8_t text_len = data[4];
-
-    LOG_DBG("Command: %d, Type: %d, Lengths: [%u, %u, %u]", cmd, type, app_len, title_len, text_len);
-
-    /* Validate lengths */
-    if (5 + app_len + title_len + text_len > len) {
-        LOG_ERR("Malformed packet: invalid lengths");
-        if (malformed_packet_cb) {
-            malformed_packet_cb("Invalid packet lengths");
-        }
-        return;
-    }
 
     switch (cmd) {
+    case CMD_TIME_SYNC: {
+        if (len < 5) {
+            LOG_ERR("Time sync packet too short: %zu bytes", len);
+            if (malformed_packet_cb) {
+                malformed_packet_cb("Invalid time sync packet");
+            }
+            return;
+        }
+
+        /* Extract Unix timestamp (4 bytes, little-endian) */
+        uint32_t timestamp = data[1] | (data[2] << 8) | (data[3] << 16) | (data[4] << 24);
+
+        LOG_INF("Received time sync: timestamp=%u", timestamp);
+
+        /* Set RTC time */
+        int ret = ENR_rtc_set_time(timestamp);
+        if (ret < 0) {
+            LOG_ERR("Failed to set RTC time (ret: %d)", ret);
+        } else {
+            LOG_INF("RTC time synchronized successfully");
+
+            /* Update display time */
+            char time_str[16];
+            if (rtc_format_time(time_str, sizeof(time_str)) == 0) {
+                notifications_update_time(time_str);
+            }
+        }
+        break;
+    }
+
     case CMD_ADD_NOTIFICATION: {
+        if (len < 9) {
+            LOG_ERR("Notification packet too short: %zu bytes", len);
+            if (malformed_packet_cb) {
+                malformed_packet_cb("Packet too short");
+            }
+            return;
+        }
+
+        notification_type_t type = (notification_type_t)data[1];
+        uint8_t app_len = data[2];
+        uint8_t title_len = data[3];
+        uint8_t text_len = data[4];
+
+        LOG_DBG("Command: %d, Type: %d, Lengths: [%u, %u, %u]", cmd, type, app_len, title_len, text_len);
+
+        /* Extract timestamp (4 bytes, little-endian) */
+        size_t offset = 5;
+        uint32_t timestamp = data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24);
+        offset += 4;
+
+        /* Validate lengths */
+        if (offset + app_len + title_len + text_len > len) {
+            LOG_ERR("Malformed packet: invalid lengths");
+            if (malformed_packet_cb) {
+                malformed_packet_cb("Invalid packet lengths");
+            }
+            return;
+        }
+
         char app_name[32] = { 0 };
         char title[64] = { 0 };
         char text[256] = { 0 };
-        char timestamp[16];
 
         /* Extract strings */
-        size_t offset = 5;
         if (app_len > 0) {
             memcpy(app_name, data + offset, app_len < 31 ? app_len : 31);
             offset += app_len;
@@ -369,16 +412,13 @@ static void parse_notification_packet(const uint8_t* data, size_t len)
             memcpy(text, data + offset, text_len < 255 ? text_len : 255);
         }
 
-        /* Get current time - placeholder for now */
-        snprintf(timestamp, sizeof(timestamp), "now");
-
-        LOG_INF("Notification: %s - %s", app_name, title);
+        LOG_INF("Notification: %s - %s (timestamp: %u)", app_name, title, timestamp);
 
         /* First update connection status to show activity */
         notifications_update_connection_status(CONN_CONNECTED);
 
-        /* Then add the notification */
-        notifications_add_notification(app_name, title, text, timestamp);
+        /* Add notification with timestamp */
+        notifications_add_notification_with_timestamp(app_name, title, text, timestamp);
         break;
     }
 

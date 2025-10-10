@@ -56,6 +56,11 @@ class BLEService : Service() {
     private val CMD_REMOVE_NOTIFICATION: Byte = 0x02
     private val CMD_CLEAR_ALL: Byte = 0x03
     private val CMD_ACTION: Byte = 0x04
+    private val CMD_TIME_SYNC: Byte = 0x05
+
+    // Time sync management
+    private var lastTimeSyncTime: Long = 0
+    private val TIME_SYNC_INTERVAL_MS = 5 * 60 * 1000L // 5 minutes
 
     companion object {
         private const val TAG = "BLEService"
@@ -103,6 +108,9 @@ class BLEService : Service() {
                     val processedCount = intent.getIntExtra("processed_count", 0)
                     val sentCount = intent.getIntExtra("sent_count", 0)
                     handleSyncCompleted(processedCount, sentCount)
+                }
+                "SEND_TIME_SYNC" -> {
+                    sendTimeSync()
                 }
             }
         } catch (e: Exception) {
@@ -285,7 +293,6 @@ class BLEService : Service() {
             _connectionStatus.value = "Connection failed"
         }
     }
-
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             try {
@@ -369,6 +376,10 @@ class BLEService : Service() {
                                 status = "Ready"
                             )
                             Log.d(TAG, "Notification characteristic found and ready! MTU: $currentMtu")
+                            
+                            /* Send initial time sync */
+                            sendTimeSync()
+                            
                             processNotificationQueue()
                         } else {
                             Log.e(TAG, "Notification characteristic not found!")
@@ -413,6 +424,51 @@ class BLEService : Service() {
         }
     }
 
+    private fun sendTimeSync() {
+        try {
+            if (!hasBluetoothPermissions()) {
+                return
+            }
+            
+            val currentTime = System.currentTimeMillis() / 1000 // Unix timestamp in seconds
+            val now = System.currentTimeMillis()
+            
+            /* Don't sync too frequently */
+            if (now - lastTimeSyncTime < 60000) { // At least 1 minute between manual syncs
+                Log.d(TAG, "Skipping time sync, last sync was too recent")
+                return
+            }
+            
+            if (notificationCharacteristic != null && _connectionStatus.value == "Ready") {
+                /* Create time sync packet: [CMD (1 byte)][timestamp (4 bytes, little-endian)] */
+                val packet = ByteArray(5)
+                packet[0] = CMD_TIME_SYNC
+                packet[1] = (currentTime and 0xFF).toByte()
+                packet[2] = ((currentTime shr 8) and 0xFF).toByte()
+                packet[3] = ((currentTime shr 16) and 0xFF).toByte()
+                packet[4] = ((currentTime shr 24) and 0xFF).toByte()
+                
+                notificationCharacteristic?.value = packet
+                bluetoothGatt?.writeCharacteristic(notificationCharacteristic)
+                
+                lastTimeSyncTime = now
+                
+                Log.d(TAG, "Time sync sent: timestamp=$currentTime")
+            } else {
+                Log.w(TAG, "Cannot send time sync: not ready")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending time sync", e)
+        }
+    }
+
+    private fun checkPeriodicTimeSync() {
+        val now = System.currentTimeMillis()
+        if (now - lastTimeSyncTime >= TIME_SYNC_INTERVAL_MS) {
+            sendTimeSync()
+        }
+    }
+
     private fun sendNotificationToESP32(notificationData: NotificationData, isExisting: Boolean = false) {
         try {
             if (!hasBluetoothPermissions()) {
@@ -421,12 +477,12 @@ class BLEService : Service() {
             
             if (notificationCharacteristic != null && _connectionStatus.value == "Ready") {
                 // Truncate long text to fit in MTU
-                val maxDataSize = currentMtu - 3 - 5 // MTU minus ATT overhead minus our header
+                val maxDataSize = currentMtu - 3 - 9 // MTU minus ATT overhead minus our header (including timestamp)
                 val truncatedData = truncateNotificationData(notificationData, maxDataSize)
                 
                 val packet = createNotificationPacket(truncatedData)
                 
-                if (packet.size <= maxDataSize) {
+                if (packet.size <= currentMtu - 3) {
                     notificationCharacteristic?.value = packet
                     bluetoothGatt?.writeCharacteristic(notificationCharacteristic)
                     
@@ -474,12 +530,12 @@ class BLEService : Service() {
         
         var appLen = minOf(appNameBytes.size, 20) // Max 20 chars for app name
         var titleLen = minOf(titleBytes.size, 40) // Max 40 chars for title
-        var textLen = minOf(textBytes.size, maxSize - 5 - appLen - titleLen) // Remaining for text
+        var textLen = minOf(textBytes.size, maxSize - 9 - appLen - titleLen) // Remaining for text (9 = header size)
         
         // Ensure we don't go negative
         if (textLen < 0) {
-            titleLen = minOf(titleLen, maxSize - 5 - appLen - 10) // Leave at least 10 for text
-            textLen = maxSize - 5 - appLen - titleLen
+            titleLen = minOf(titleLen, maxSize - 9 - appLen - 10) // Leave at least 10 for text
+            textLen = maxSize - 9 - appLen - titleLen
         }
         
         return NotificationData(
@@ -491,7 +547,6 @@ class BLEService : Service() {
             packageName = data.packageName
         )
     }
-
     private fun createNotificationPacket(notificationData: NotificationData): ByteArray {
         val appNameBytes = notificationData.appName.toByteArray(Charsets.UTF_8)
         val titleBytes = notificationData.title.toByteArray(Charsets.UTF_8)
@@ -501,7 +556,11 @@ class BLEService : Service() {
         val titleLen = titleBytes.size
         val textLen = textBytes.size
         
-        val totalLength = 5 + appLen + titleLen + textLen
+        /* Get Unix timestamp (seconds since epoch) */
+        val timestamp = (System.currentTimeMillis() / 1000).toInt()
+        
+        /* Packet format: [CMD][TYPE][APP_LEN][TITLE_LEN][TEXT_LEN][TIMESTAMP (4 bytes)][APP_NAME][TITLE][TEXT] */
+        val totalLength = 9 + appLen + titleLen + textLen
         val packet = ByteArray(totalLength)
         
         var offset = 0
@@ -511,13 +570,19 @@ class BLEService : Service() {
         packet[offset++] = titleLen.toByte()
         packet[offset++] = textLen.toByte()
         
+        /* Add timestamp (4 bytes, little-endian) */
+        packet[offset++] = (timestamp and 0xFF).toByte()
+        packet[offset++] = ((timestamp shr 8) and 0xFF).toByte()
+        packet[offset++] = ((timestamp shr 16) and 0xFF).toByte()
+        packet[offset++] = ((timestamp shr 24) and 0xFF).toByte()
+        
         System.arraycopy(appNameBytes, 0, packet, offset, appLen)
         offset += appLen
         System.arraycopy(titleBytes, 0, packet, offset, titleLen)
         offset += titleLen
         System.arraycopy(textBytes, 0, packet, offset, textLen)
         
-        Log.d(TAG, "Created packet: CMD=${CMD_ADD_NOTIFICATION}, type=${getNotificationType(notificationData.packageName)}, lengths=[$appLen,$titleLen,$textLen], total=$totalLength bytes, MTU=$currentMtu")
+        Log.d(TAG, "Created packet: CMD=${CMD_ADD_NOTIFICATION}, type=${getNotificationType(notificationData.packageName)}, lengths=[$appLen,$titleLen,$textLen], timestamp=$timestamp, total=$totalLength bytes, MTU=$currentMtu")
         
         return packet
     }
@@ -560,7 +625,8 @@ class BLEService : Service() {
                 }
             }
             "Ready" -> {
-                Log.d(TAG, "Sync check: processing queue")
+                Log.d(TAG, "Sync check: processing queue and checking time sync")
+                checkPeriodicTimeSync()
                 processNotificationQueue()
             }
         }

@@ -7,6 +7,7 @@
 
 #include "fonts/heb_fonts.h"
 #include "notifications/notifications.h"
+#include "rtc/rtc.h"
 
 #define SCREEN_WIDTH 240
 #define SCREEN_HEIGHT 240
@@ -18,7 +19,7 @@ typedef struct {
     char app_name[32];
     char sender[64];
     char content[256];
-    char timestamp[16];
+    uint32_t timestamp; // Unix timestamp
     bool is_read;
 } notification_t;
 
@@ -176,40 +177,46 @@ static void sanitize_text_for_display(const char* input, char* output, size_t ou
 static void init_sample_notifications(void)
 {
     notification_count = 5;
+    uint32_t current_time = rtc_get_timestamp();
 
-    // Notification 1: WhatsApp
+    /* If RTC not set yet, use placeholder values */
+    if (current_time == 0) {
+        current_time = 1700000000; /* Some arbitrary timestamp */
+    }
+
+    // Notification 1: WhatsApp (5 minutes ago)
     strcpy(notifications[0].app_name, "WhatsApp");
     strcpy(notifications[0].sender, "Mom");
     strcpy(notifications[0].content, "Hi honey! How are you today?");
-    strcpy(notifications[0].timestamp, "14:23");
+    notifications[0].timestamp = current_time - 300; /* 5 minutes ago */
     notifications[0].is_read = false;
 
-    // Notification 2: Email (Hebrew text)
+    // Notification 2: Email (30 minutes ago, Hebrew text)
     strcpy(notifications[1].app_name, "Gmail");
     strcpy(notifications[1].sender, "משה כהן");
     strcpy(notifications[1].content, "בדיקה של הודעה בעברית משהו משהו.");
-    strcpy(notifications[1].timestamp, "13:45");
+    notifications[1].timestamp = current_time - 1800; /* 30 minutes ago */
     notifications[1].is_read = false;
 
-    // Notification 3: SMS
+    // Notification 3: SMS (2 hours ago)
     strcpy(notifications[2].app_name, "Messages");
     strcpy(notifications[2].sender, "John");
     strcpy(notifications[2].content, "Are we still meeting tonight?");
-    strcpy(notifications[2].timestamp, "12:30");
+    notifications[2].timestamp = current_time - 7200; /* 2 hours ago */
     notifications[2].is_read = true;
 
-    // Notification 4: Discord
+    // Notification 4: Discord (5 hours ago)
     strcpy(notifications[3].app_name, "Discord");
     strcpy(notifications[3].sender, "Dev Team");
     strcpy(notifications[3].content, "New commit pushed to main branch. Please review the changes in the notification system implementation.");
-    strcpy(notifications[3].timestamp, "11:15");
+    notifications[3].timestamp = current_time - 18000; /* 5 hours ago */
     notifications[3].is_read = false;
 
-    // Notification 5: Telegram (with emoji that will be sanitized)
+    // Notification 5: Telegram (yesterday, with emoji that will be sanitized)
     strcpy(notifications[4].app_name, "Telegram");
     strcpy(notifications[4].sender, "Sarah");
     strcpy(notifications[4].content, "Check this out 🚀!");
-    strcpy(notifications[4].timestamp, "10:45");
+    notifications[4].timestamp = current_time - 86400; /* 1 day ago */
     notifications[4].is_read = false;
 }
 
@@ -315,7 +322,7 @@ static void create_top_bar(void)
 
     // Time label (left-center)
     time_label = lv_label_create(top_container);
-    lv_label_set_text(time_label, "14:23");
+    lv_label_set_text(time_label, "--:--");
     lv_obj_align(time_label, LV_ALIGN_CENTER, -15, 0);
 
     // Status circle (right of time)
@@ -323,7 +330,7 @@ static void create_top_bar(void)
     lv_obj_set_size(status_circle, 10, 10);
     lv_obj_align(status_circle, LV_ALIGN_CENTER, 15, 0);
     lv_obj_set_style_radius(status_circle, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(status_circle, status_colors[CONN_CONNECTED], 0);
+    lv_obj_set_style_bg_color(status_circle, status_colors[CONN_DISCONNECTED], 0);
     lv_obj_set_style_border_opa(status_circle, LV_OPA_TRANSP, 0);
 }
 
@@ -490,8 +497,13 @@ static void update_notification_display(void)
     }
     lv_label_set_text(notification_content, sanitized_content);
 
-    // Update secondary info
-    lv_label_set_text(secondary_info, notif->timestamp);
+    // Update secondary info with relative time
+    static char time_str[32];
+    if (rtc_format_relative_time(notif->timestamp, time_str, sizeof(time_str)) == 0) {
+        lv_label_set_text(secondary_info, time_str);
+    } else {
+        lv_label_set_text(secondary_info, "unknown");
+    }
 
     // Update counter
     static char counter_text[20];
@@ -608,8 +620,8 @@ void notifications_update_time(const char* time_str)
     update_time(time_str);
 }
 
-void notifications_add_notification(const char* app_name, const char* sender,
-    const char* content, const char* timestamp)
+void notifications_add_notification_with_timestamp(const char* app_name, const char* sender,
+    const char* content, uint32_t timestamp)
 {
     if (notification_count >= MAX_NOTIFICATIONS) {
         // Remove oldest notification to make room
@@ -633,14 +645,25 @@ void notifications_add_notification(const char* app_name, const char* sender,
     strncpy(new_notif->content, content, sizeof(new_notif->content) - 1);
     new_notif->content[sizeof(new_notif->content) - 1] = '\0';
 
-    strncpy(new_notif->timestamp, timestamp, sizeof(new_notif->timestamp) - 1);
-    new_notif->timestamp[sizeof(new_notif->timestamp) - 1] = '\0';
-
+    new_notif->timestamp = timestamp;
     new_notif->is_read = false;
 
     notification_count++;
     current_notification = notification_count - 1; // Show newest notification
     update_notification_display();
+}
+
+void notifications_add_notification(const char* app_name, const char* sender,
+    const char* content, const char* timestamp)
+{
+    /* Legacy function - use current time if RTC is set */
+    uint32_t ts = rtc_get_timestamp();
+    if (ts == 0) {
+        /* RTC not set, use a placeholder */
+        ts = 1700000000;
+    }
+
+    notifications_add_notification_with_timestamp(app_name, sender, content, ts);
 }
 
 void notifications_clear_all(void)
@@ -663,7 +686,20 @@ int notifications_get_unread_count(void)
 
 void notifications_handle_timers(void)
 {
+    static uint32_t last_update = 0;
+    uint32_t now = k_uptime_get_32();
+
+    /* Handle delete timeout */
     handle_delete_timeout();
+
+    /* Update relative timestamps periodically (every 30 seconds) */
+    if (now - last_update >= 30000) {
+        /* Trigger display refresh to update relative times */
+        if (notification_count > 0) {
+            update_notification_display();
+        }
+        last_update = now;
+    }
 }
 
 void create_notification_screen(void)
@@ -689,7 +725,16 @@ void create_notification_screen(void)
     lv_obj_clear_flag(main_screen, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
     // Initial display update
-    update_connection_status(CONN_CONNECTED);
+    update_connection_status(CONN_DISCONNECTED);
+
+    // Update time from RTC if available
+    char time_str[16];
+    if (rtc_format_time(time_str, sizeof(time_str)) == 0) {
+        update_time(time_str);
+    } else {
+        update_time("--:--");
+    }
+
     update_notification_display();
 
     // Load the screen

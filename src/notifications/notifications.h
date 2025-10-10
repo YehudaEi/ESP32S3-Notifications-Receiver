@@ -49,12 +49,23 @@ void notifications_update_connection_status(connection_status_t status);
 void notifications_update_time(const char* time_str);
 
 /**
- * @brief Add a new notification
+ * @brief Add a new notification with Unix timestamp
  *
  * @param app_name Name of the app (max 31 chars)
  * @param sender Sender name (max 63 chars)
  * @param content Notification content (max 255 chars)
- * @param timestamp Time string (max 15 chars)
+ * @param timestamp Unix timestamp (seconds since epoch)
+ */
+void notifications_add_notification_with_timestamp(const char* app_name, const char* sender,
+    const char* content, uint32_t timestamp);
+
+/**
+ * @brief Add a new notification (legacy function)
+ *
+ * @param app_name Name of the app (max 31 chars)
+ * @param sender Sender name (max 63 chars)
+ * @param content Notification content (max 255 chars)
+ * @param timestamp Time string (max 15 chars) - DEPRECATED, use timestamp version
  */
 void notifications_add_notification(const char* app_name, const char* sender,
     const char* content, const char* timestamp);
@@ -74,7 +85,7 @@ int notifications_get_unread_count(void);
 /**
  * @brief Handle internal timers (call in main loop)
  *
- * This handles delete timeout functionality
+ * This handles delete timeout functionality and updates relative timestamps
  */
 void notifications_handle_timers(void);
 
